@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ctify
+Comment=Local music player
+Exec=ctify
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;mp3;player;library;
+StartupNotify=true
