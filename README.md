@@ -15,7 +15,7 @@ Supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.aac`,
 - SDL2
 - SDL2_ttf
 - `mpv`
-- `ffmpeg` / `ffprobe` for metadata
+- `ffmpeg` / `ffprobe` for metadata and album covers
 
 Examples:
 
@@ -78,6 +78,7 @@ Run without installing:
 
 - `favorites.txt`: favorite tracks
 - `playlists/*.m3u`: playlists shown in the sidebar
+- `covers/`: extracted album artwork cache
 
 You can add a playlist manually by creating a `.m3u` file in that folder with
 one track path per line.

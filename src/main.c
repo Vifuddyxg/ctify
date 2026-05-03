@@ -79,6 +79,9 @@ typedef struct {
     bool search_active;
     bool ignore_next_text;
     ViewMode view;
+    SDL_Texture *covers[MAX_TRACKS];
+    int cover_cursor;
+    bool covers_loaded;
 } Library;
 
 typedef struct {
@@ -179,6 +182,16 @@ static bool command_exists(const char *cmd)
     return false;
 }
 
+static unsigned long hash_string(const char *s)
+{
+    unsigned long hash = 1469598103934665603UL;
+    while (*s) {
+        hash ^= (unsigned char)*s++;
+        hash *= 1099511628211UL;
+    }
+    return hash;
+}
+
 static const char *basename_of(const char *path)
 {
     const char *base = strrchr(path, '/');
@@ -231,6 +244,14 @@ static void playlist_file(char *out, size_t out_len, const char *name)
     playlists_dir(dir, sizeof(dir));
     snprintf(file, sizeof(file), "%s.m3u", name);
     path_join(out, out_len, dir, file);
+}
+
+static void covers_dir(char *out, size_t out_len)
+{
+    char state_dir[PATH_MAX];
+    ensure_state_dir(state_dir, sizeof(state_dir));
+    if (path_join(out, out_len, state_dir, "covers"))
+        mkdir(out, 0755);
 }
 
 static void title_from_filename(const char *name, char *out, size_t out_len)
@@ -386,6 +407,19 @@ static void save_favorites(const Library *lib)
     fclose(fp);
 }
 
+static void library_free_covers(Library *lib)
+{
+    if (!lib) return;
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        if (lib->covers[i]) {
+            SDL_DestroyTexture(lib->covers[i]);
+            lib->covers[i] = NULL;
+        }
+    }
+    lib->cover_cursor = 0;
+    lib->covers_loaded = false;
+}
+
 static void load_playlists(Library *lib)
 {
     lib->playlist_count = 0;
@@ -495,6 +529,7 @@ static void scan_dir(Library *lib, const char *dir_path, int depth)
 
 static void library_scan(Library *lib)
 {
+    library_free_covers(lib);
     lib->count = 0;
     lib->selected = -1;
     lib->scroll_y = 0;
@@ -767,6 +802,71 @@ static int random_visible(const Library *lib)
     return -1;
 }
 
+static bool make_cover_bmp(const Track *t, char *bmp_path, size_t path_len)
+{
+    char dir[PATH_MAX];
+    covers_dir(dir, sizeof(dir));
+
+    struct stat st;
+    long mtime = stat(t->path, &st) == 0 ? (long)st.st_mtime : 0;
+    char name[96];
+    snprintf(name, sizeof(name), "%016lx_%ld_cover.bmp", hash_string(t->path), mtime);
+    if (!path_join(bmp_path, path_len, dir, name))
+        return false;
+
+    if (access(bmp_path, R_OK) == 0) return true;
+    char none_path[PATH_MAX];
+    char none_name[96];
+    snprintf(none_name, sizeof(none_name), "%016lx_%ld_cover.none", hash_string(t->path), mtime);
+    if (path_join(none_path, sizeof(none_path), dir, none_name) &&
+        access(none_path, R_OK) == 0)
+        return false;
+    if (!command_exists("ffmpeg")) return false;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("ffmpeg", "ffmpeg",
+               "-y", "-hide_banner", "-loglevel", "error",
+               "-i", t->path,
+               "-map", "0:v:0",
+               "-frames:v", "1",
+               "-vf", "scale=512:512:force_original_aspect_ratio=increase,crop=512:512",
+               bmp_path,
+               (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) return false;
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0 && access(bmp_path, R_OK) == 0;
+    if (!ok && none_path[0] != '\0') {
+        FILE *fp = fopen(none_path, "w");
+        if (fp) fclose(fp);
+    }
+    return ok;
+}
+
+static void library_load_next_cover(Library *lib, SDL_Renderer *r)
+{
+    if (lib->covers_loaded) return;
+    while (lib->cover_cursor < lib->count) {
+        int i = lib->cover_cursor++;
+        if (lib->covers[i]) continue;
+
+        char bmp_path[PATH_MAX];
+        if (!make_cover_bmp(&lib->tracks[i], bmp_path, sizeof(bmp_path)))
+            continue;
+
+        SDL_Surface *surf = SDL_LoadBMP(bmp_path);
+        if (!surf) continue;
+        lib->covers[i] = SDL_CreateTextureFromSurface(r, surf);
+        SDL_FreeSurface(surf);
+        return;
+    }
+    lib->covers_loaded = true;
+}
+
 static double player_position(const Player *p)
 {
     if (p->current < 0) return 0.0;
@@ -884,8 +984,17 @@ static void art_color(const char *seed, Uint8 *r, Uint8 *g, Uint8 *b)
     *r = c[0]; *g = c[1]; *b = c[2];
 }
 
-static void draw_art(SDL_Renderer *r, const UI *ui, const Track *t, int x, int y, int size)
+static void draw_art(SDL_Renderer *r, const UI *ui, const Track *t,
+                     SDL_Texture *cover, int x, int y, int size)
 {
+    if (cover) {
+        SDL_Rect dst = {x, y, size, size};
+        SDL_RenderCopy(r, cover, NULL, &dst);
+        draw_rect(r, x, y, size, 1, 70, 78, 94, 180);
+        draw_rect(r, x, y + size - 1, size, 1, 8, 9, 12, 180);
+        return;
+    }
+
     Uint8 rr, gg, bb;
     art_color(t ? t->album[0] ? t->album : t->title : "ctify", &rr, &gg, &bb);
     draw_rect(r, x, y, size, size, rr, gg, bb, 255);
@@ -976,7 +1085,7 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
         draw_text_fit(r, ui->sm, current ? ">" : num,
                       content_x + LEFT_PAD, y + 14, 42,
                       current ? 79 : 85, current ? 142 : 85, current ? 247 : 85);
-        draw_art(r, ui, t, content_x + LEFT_PAD + 48, y + 7, 32);
+        draw_art(r, ui, t, lib->covers[i], content_x + LEFT_PAD + 48, y + 7, 32);
         draw_text_fit(r, ui->md, t->title, content_x + LEFT_PAD + 90, y + 8,
                       content_w - 468, current ? 79 : 224, current ? 142 : 224, current ? 247 : 224);
         draw_text_fit(r, ui->sm, t->album[0] ? t->album : t->folder,
@@ -1004,7 +1113,8 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
         draw_rect(r, now_x, 0, 2, win_h - PLAYER_H, 47, 53, 64, 255);
         draw_text(r, ui->sm, "NOW PLAYING", now_x + 24, 28, 96, 100, 109);
         const Track *ct = player->current >= 0 && player->current < lib->count ? &lib->tracks[player->current] : NULL;
-        draw_art(r, ui, ct, now_x + 28, 70, NOW_W - 56);
+        SDL_Texture *cover = player->current >= 0 && player->current < lib->count ? lib->covers[player->current] : NULL;
+        draw_art(r, ui, ct, cover, now_x + 28, 70, NOW_W - 56);
         if (ct) {
             draw_text_fit(r, ui->md, ct->title, now_x + 24, 292, NOW_W - 48, 240, 240, 240);
             draw_text_fit(r, ui->sm, ct->artist, now_x + 24, 318, NOW_W - 48, 90, 143, 200);
@@ -1313,10 +1423,12 @@ int main(int argc, char **argv)
         player_reap(&player, lib);
         render(renderer, &ui, lib, &player);
         SDL_RenderPresent(renderer);
+        library_load_next_cover(lib, renderer);
     }
 
     SDL_StopTextInput();
     player_stop(&player);
+    library_free_covers(lib);
     free(lib);
     ui_close(&ui);
     SDL_DestroyRenderer(renderer);
