@@ -1,8 +1,8 @@
 # ctify
 
 `ctify` is a small local music player for Linux written in C. It scans
-`~/Music` by default, shows your local tracks in a simple SDL interface, and
-uses `mpv` as the playback backend.
+`~/Music` by default, shows your local tracks in a Soundwave-style SDL
+interface, and uses `mpv` as the playback backend.
 
 Supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.aac`,
 `.opus`, and `.wma`.
@@ -53,7 +53,8 @@ Run without installing:
 
 ## Controls
 
-- Click, `Enter`, or `Space`: play selected track
+- Click a track: select it
+- `Space` or `Enter`: play/pause selected track
 - `Space`: pause/resume when a track is already playing
 - `1` / `2` / `3`: Home, All Songs, Favorites
 - Arrow keys: move selection
@@ -62,8 +63,21 @@ Run without installing:
 - `n`: next track
 - `b`: previous track
 - `f`: favorite/unfavorite selected track
+- `a`: add selected track to the `Library` playlist
 - `s`: shuffle on/off
 - `t`: repeat on/off
 - `+` / `-`: volume up/down
+- Drag/click the progress bar: seek
+- Drag/click the volume bar: set volume
 - `r`: rescan library
 - `Esc`: close search or quit
+
+## Library State
+
+`ctify` stores lightweight library state in `~/.local/state/ctify`:
+
+- `favorites.txt`: favorite tracks
+- `playlists/*.m3u`: playlists shown in the sidebar
+
+You can add a playlist manually by creating a `.m3u` file in that folder with
+one track path per line.

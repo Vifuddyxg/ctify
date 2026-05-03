@@ -38,11 +38,14 @@
 #define SIDEBAR_W 220
 #define NOW_W 260
 #define LEFT_PAD 28
+#define MAX_PLAYLISTS 32
+#define MAX_PLAYLIST_TRACKS 256
 
 typedef enum {
     VIEW_HOME = 0,
     VIEW_ALL = 1,
-    VIEW_FAVORITES = 2
+    VIEW_FAVORITES = 2,
+    VIEW_PLAYLIST = 3
 } ViewMode;
 
 typedef struct {
@@ -56,8 +59,18 @@ typedef struct {
 } Track;
 
 typedef struct {
+    char name[TITLE_LEN];
+    char path[PATH_MAX];
+    char tracks[MAX_PLAYLIST_TRACKS][PATH_MAX];
+    int count;
+} Playlist;
+
+typedef struct {
     Track tracks[MAX_TRACKS];
     int count;
+    Playlist playlists[MAX_PLAYLISTS];
+    int playlist_count;
+    int active_playlist;
     int selected;
     int scroll_y;
     int max_scroll;
@@ -82,6 +95,10 @@ typedef struct {
     int volume;
     bool shuffle;
     bool repeat;
+    int duration_sec;
+    double paused_pos;
+    Uint32 started_ticks;
+    bool was_paused;
 } Player;
 
 static const char *font_paths[] = {
@@ -197,6 +214,23 @@ static void favorites_file(char *out, size_t out_len)
     char state_dir[PATH_MAX];
     ensure_state_dir(state_dir, sizeof(state_dir));
     path_join(out, out_len, state_dir, "favorites.txt");
+}
+
+static void playlists_dir(char *out, size_t out_len)
+{
+    char state_dir[PATH_MAX];
+    ensure_state_dir(state_dir, sizeof(state_dir));
+    if (path_join(out, out_len, state_dir, "playlists"))
+        mkdir(out, 0755);
+}
+
+static void playlist_file(char *out, size_t out_len, const char *name)
+{
+    char dir[PATH_MAX];
+    char file[TITLE_LEN + 8];
+    playlists_dir(dir, sizeof(dir));
+    snprintf(file, sizeof(file), "%s.m3u", name);
+    path_join(out, out_len, dir, file);
 }
 
 static void title_from_filename(const char *name, char *out, size_t out_len)
@@ -352,6 +386,84 @@ static void save_favorites(const Library *lib)
     fclose(fp);
 }
 
+static void load_playlists(Library *lib)
+{
+    lib->playlist_count = 0;
+    lib->active_playlist = -1;
+
+    char dir_path[PATH_MAX];
+    playlists_dir(dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && lib->playlist_count < MAX_PLAYLISTS) {
+        if (entry->d_name[0] == '.') continue;
+        const char *ext = strrchr(entry->d_name, '.');
+        if (!ext || strcasecmp(ext, ".m3u") != 0) continue;
+
+        Playlist *pl = &lib->playlists[lib->playlist_count];
+        memset(pl, 0, sizeof(*pl));
+        copy_text(pl->name, sizeof(pl->name), entry->d_name);
+        char *dot = strrchr(pl->name, '.');
+        if (dot) *dot = '\0';
+        if (!path_join(pl->path, sizeof(pl->path), dir_path, entry->d_name))
+            continue;
+
+        FILE *fp = fopen(pl->path, "r");
+        if (!fp) continue;
+        char line[PATH_MAX + 8];
+        while (fgets(line, sizeof(line), fp) && pl->count < MAX_PLAYLIST_TRACKS) {
+            trim_line(line);
+            if (line[0] == '\0' || line[0] == '#') continue;
+            copy_text(pl->tracks[pl->count++], PATH_MAX, line);
+        }
+        fclose(fp);
+        lib->playlist_count++;
+    }
+    closedir(dir);
+}
+
+static bool playlist_contains(const Playlist *pl, const char *track_path)
+{
+    if (!pl) return false;
+    for (int i = 0; i < pl->count; i++)
+        if (strcmp(pl->tracks[i], track_path) == 0)
+            return true;
+    return false;
+}
+
+static void add_to_playlist(Library *lib, int playlist_idx, int track_idx)
+{
+    if (playlist_idx < 0 || playlist_idx >= lib->playlist_count) return;
+    if (track_idx < 0 || track_idx >= lib->count) return;
+    Playlist *pl = &lib->playlists[playlist_idx];
+    if (pl->count >= MAX_PLAYLIST_TRACKS || playlist_contains(pl, lib->tracks[track_idx].path))
+        return;
+    copy_text(pl->tracks[pl->count++], PATH_MAX, lib->tracks[track_idx].path);
+
+    FILE *fp = fopen(pl->path, "a");
+    if (!fp) return;
+    fprintf(fp, "%s\n", lib->tracks[track_idx].path);
+    fclose(fp);
+}
+
+static int ensure_default_playlist(Library *lib)
+{
+    for (int i = 0; i < lib->playlist_count; i++)
+        if (strcmp(lib->playlists[i].name, "Library") == 0)
+            return i;
+    if (lib->playlist_count >= MAX_PLAYLISTS) return -1;
+
+    Playlist *pl = &lib->playlists[lib->playlist_count];
+    memset(pl, 0, sizeof(*pl));
+    copy_text(pl->name, sizeof(pl->name), "Library");
+    playlist_file(pl->path, sizeof(pl->path), "Library");
+    FILE *fp = fopen(pl->path, "a");
+    if (fp) fclose(fp);
+    return lib->playlist_count++;
+}
+
 static void scan_dir(Library *lib, const char *dir_path, int depth)
 {
     if (depth > 16) return;
@@ -391,6 +503,7 @@ static void library_scan(Library *lib)
     scan_dir(lib, lib->root, 0);
     qsort(lib->tracks, (size_t)lib->count, sizeof(Track), cmp_track);
     load_favorites(lib);
+    load_playlists(lib);
     lib->selected = lib->count > 0 ? 0 : -1;
 }
 
@@ -399,6 +512,12 @@ static bool matches_search(const Library *lib, int idx)
     if (idx < 0 || idx >= lib->count) return false;
     const Track *t = &lib->tracks[idx];
     if (lib->view == VIEW_FAVORITES && !t->favorite) return false;
+    if (lib->view == VIEW_PLAYLIST) {
+        if (lib->active_playlist < 0 || lib->active_playlist >= lib->playlist_count)
+            return false;
+        if (!playlist_contains(&lib->playlists[lib->active_playlist], t->path))
+            return false;
+    }
     if (lib->search[0] == '\0') return true;
     return strcasestr(t->title, lib->search) ||
            strcasestr(t->artist, lib->search) ||
@@ -479,13 +598,22 @@ static int hit_test(const Library *lib, int mx, int my)
     return -1;
 }
 
-static int sidebar_hit(int mx, int my)
+static int sidebar_hit(const Library *lib, int mx, int my, int *playlist_idx)
 {
+    if (playlist_idx) *playlist_idx = -1;
     if (mx < 0 || mx >= SIDEBAR_W || my < 0 || my >= win_h - PLAYER_H)
         return -1;
     if (my >= 94 && my < 132) return VIEW_HOME;
     if (my >= 138 && my < 176) return VIEW_ALL;
-    if (my >= 228 && my < 266) return VIEW_FAVORITES;
+    if (my >= 238 && my < 276) return VIEW_FAVORITES;
+    int first = 282;
+    for (int i = 0; i < lib->playlist_count; i++) {
+        int y = first + i * 40;
+        if (my >= y && my < y + 36) {
+            if (playlist_idx) *playlist_idx = i;
+            return VIEW_PLAYLIST;
+        }
+    }
     return -1;
 }
 
@@ -513,6 +641,8 @@ static int ipc_send(const Player *p, const char *json)
     close(fd);
     return written == len ? 0 : -1;
 }
+
+static double player_position(const Player *p);
 
 static void player_stop(Player *p)
 {
@@ -564,6 +694,9 @@ static void player_play(Player *p, const Library *lib, int idx)
         p->pid = pid;
         p->current = idx;
         p->playing = true;
+        p->duration_sec = lib->tracks[idx].duration_sec;
+        p->paused_pos = 0.0;
+        p->started_ticks = SDL_GetTicks();
     }
 }
 
@@ -571,7 +704,13 @@ static void player_pause_toggle(Player *p)
 {
     if (p->pid <= 0) return;
     ipc_send(p, "{\"command\":[\"cycle\",\"pause\"]}");
-    p->playing = !p->playing;
+    if (p->playing) {
+        p->paused_pos = player_position(p);
+        p->playing = false;
+    } else {
+        p->started_ticks = SDL_GetTicks();
+        p->playing = true;
+    }
 }
 
 static void player_set_volume(Player *p, int volume)
@@ -596,6 +735,7 @@ static void player_reap(Player *p, Library *lib)
         int finished = p->current;
         p->pid = -1;
         p->playing = false;
+        p->paused_pos = 0.0;
         if (p->socket_path[0] != '\0') {
             unlink(p->socket_path);
             p->socket_path[0] = '\0';
@@ -625,6 +765,31 @@ static int random_visible(const Library *lib)
         pos++;
     }
     return -1;
+}
+
+static double player_position(const Player *p)
+{
+    if (p->current < 0) return 0.0;
+    if (!p->playing) return p->paused_pos;
+    double elapsed = (double)(SDL_GetTicks() - p->started_ticks) / 1000.0;
+    double pos = p->paused_pos + elapsed;
+    if (p->duration_sec > 0 && pos > p->duration_sec)
+        pos = p->duration_sec;
+    return pos;
+}
+
+static void player_seek(Player *p, double seconds)
+{
+    if (seconds < 0.0) seconds = 0.0;
+    if (p->duration_sec > 0 && seconds > p->duration_sec)
+        seconds = p->duration_sec;
+    p->paused_pos = seconds;
+    p->started_ticks = SDL_GetTicks();
+    if (p->pid > 0) {
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"time-pos\",%.3f]}", seconds);
+        ipc_send(p, cmd);
+    }
 }
 
 static void draw_rect(SDL_Renderer *r, int x, int y, int w, int h,
@@ -704,6 +869,37 @@ static void draw_sidebar_button(SDL_Renderer *r, const UI *ui, const char *label
                   active ? 127 : 136, active ? 176 : 136, active ? 255 : 146);
 }
 
+static void art_color(const char *seed, Uint8 *r, Uint8 *g, Uint8 *b)
+{
+    unsigned hash = 2166136261u;
+    for (const char *p = seed ? seed : ""; *p; p++) {
+        hash ^= (unsigned char)*p;
+        hash *= 16777619u;
+    }
+    const Uint8 palette[][3] = {
+        {26, 51, 85}, {26, 64, 48}, {53, 26, 68},
+        {63, 42, 18}, {22, 48, 74}, {42, 26, 63}
+    };
+    const Uint8 *c = palette[hash % 6];
+    *r = c[0]; *g = c[1]; *b = c[2];
+}
+
+static void draw_art(SDL_Renderer *r, const UI *ui, const Track *t, int x, int y, int size)
+{
+    Uint8 rr, gg, bb;
+    art_color(t ? t->album[0] ? t->album : t->title : "ctify", &rr, &gg, &bb);
+    draw_rect(r, x, y, size, size, rr, gg, bb, 255);
+    draw_rect(r, x, y, size, 1, 70, 78, 94, 255);
+    draw_rect(r, x, y + size - 1, size, 1, 8, 9, 12, 255);
+    char letter[8] = "♪";
+    if (t && t->title[0]) {
+        letter[0] = (char)toupper((unsigned char)t->title[0]);
+        letter[1] = '\0';
+    }
+    draw_text(r, size > 80 ? ui->lg : ui->md, letter,
+              x + size / 2 - 9, y + size / 2 - 14, 245, 247, 250);
+}
+
 static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *player)
 {
     draw_rect(r, 0, 0, win_w, win_h, 16, 17, 22, 255);
@@ -721,12 +917,20 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
     draw_sidebar_button(r, ui, "All Songs", 138, lib->view == VIEW_ALL);
     draw_rect(r, 20, 198, SIDEBAR_W - 40, 1, 42, 44, 51, 255);
     draw_text(r, ui->sm, "PLAYLISTS", 28, 210, 96, 100, 109);
-    draw_sidebar_button(r, ui, "Favorites", 228, lib->view == VIEW_FAVORITES);
+    draw_sidebar_button(r, ui, "Favorites", 238, lib->view == VIEW_FAVORITES);
+    for (int i = 0; i < lib->playlist_count; i++) {
+        int y = 282 + i * 40;
+        if (y + 36 >= win_h - PLAYER_H) break;
+        bool active = lib->view == VIEW_PLAYLIST && lib->active_playlist == i;
+        draw_sidebar_button(r, ui, lib->playlists[i].name, y, active);
+    }
 
     draw_rect(r, content_x, 0, content_w, win_h - PLAYER_H, 16, 17, 22, 255);
     draw_rect(r, content_x, 0, content_w, TOP_H, 16, 17, 22, 255);
     const char *view_title = lib->view == VIEW_HOME ? "Home" :
-                             lib->view == VIEW_FAVORITES ? "Favorites" : "All Songs";
+                             lib->view == VIEW_FAVORITES ? "Favorites" :
+                             lib->view == VIEW_PLAYLIST && lib->active_playlist >= 0 ?
+                             lib->playlists[lib->active_playlist].name : "All Songs";
     draw_text(r, ui->lg, view_title, content_x + LEFT_PAD, 24, 240, 240, 240);
 
     char info[256];
@@ -772,10 +976,11 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
         draw_text_fit(r, ui->sm, current ? ">" : num,
                       content_x + LEFT_PAD, y + 14, 42,
                       current ? 79 : 85, current ? 142 : 85, current ? 247 : 85);
-        draw_text_fit(r, ui->md, t->title, content_x + LEFT_PAD + 52, y + 8,
-                      content_w - 430, current ? 79 : 224, current ? 142 : 224, current ? 247 : 224);
+        draw_art(r, ui, t, content_x + LEFT_PAD + 48, y + 7, 32);
+        draw_text_fit(r, ui->md, t->title, content_x + LEFT_PAD + 90, y + 8,
+                      content_w - 468, current ? 79 : 224, current ? 142 : 224, current ? 247 : 224);
         draw_text_fit(r, ui->sm, t->album[0] ? t->album : t->folder,
-                      content_x + LEFT_PAD + 52, y + 27, content_w - 430, 96, 100, 109);
+                      content_x + LEFT_PAD + 90, y + 27, content_w - 468, 96, 100, 109);
         draw_text_fit(r, ui->sm, t->artist, content_x + content_w - 330, y + 14,
                       190, 90, 143, 200);
         char dur[32];
@@ -798,15 +1003,13 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
         draw_rect(r, now_x, 0, win_w - now_x, win_h - PLAYER_H, 19, 21, 27, 255);
         draw_rect(r, now_x, 0, 2, win_h - PLAYER_H, 47, 53, 64, 255);
         draw_text(r, ui->sm, "NOW PLAYING", now_x + 24, 28, 96, 100, 109);
-        draw_rect(r, now_x + 28, 70, NOW_W - 56, NOW_W - 56, 26, 42, 69, 255);
-        const char *letter = "♪";
-        char art_letter[8];
-        if (player->current >= 0 && player->current < lib->count && lib->tracks[player->current].title[0]) {
-            art_letter[0] = (char)toupper((unsigned char)lib->tracks[player->current].title[0]);
-            art_letter[1] = '\0';
-            letter = art_letter;
+        const Track *ct = player->current >= 0 && player->current < lib->count ? &lib->tracks[player->current] : NULL;
+        draw_art(r, ui, ct, now_x + 28, 70, NOW_W - 56);
+        if (ct) {
+            draw_text_fit(r, ui->md, ct->title, now_x + 24, 292, NOW_W - 48, 240, 240, 240);
+            draw_text_fit(r, ui->sm, ct->artist, now_x + 24, 318, NOW_W - 48, 90, 143, 200);
+            draw_text_fit(r, ui->sm, ct->album, now_x + 24, 340, NOW_W - 48, 85, 106, 128);
         }
-        draw_text(r, ui->lg, letter, now_x + NOW_W / 2 - 10, 150, 130, 160, 210);
     }
 
     draw_rect(r, 0, win_h - PLAYER_H, win_w, PLAYER_H, 27, 30, 39, 255);
@@ -836,12 +1039,19 @@ static void render(SDL_Renderer *r, const UI *ui, Library *lib, const Player *pl
     draw_text(r, ui->md, player->repeat ? "REP" : "rep", cx + 150, win_h - PLAYER_H + 28,
               player->repeat ? 79 : 160, player->repeat ? 142 : 160, player->repeat ? 247 : 160);
 
+    double pos_sec = player_position(player);
+    double frac = player->duration_sec > 0 ? pos_sec / (double)player->duration_sec : 0.0;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
     draw_rect(r, cx - 220, win_h - PLAYER_H + 78, 440, 4, 48, 51, 58, 255);
-    draw_rect(r, cx - 220, win_h - PLAYER_H + 78, player->playing ? 110 : 8, 4, 232, 237, 245, 255);
+    draw_rect(r, cx - 220, win_h - PLAYER_H + 78, (int)(440.0 * frac), 4, 232, 237, 245, 255);
+    draw_rect(r, cx - 222 + (int)(440.0 * frac), win_h - PLAYER_H + 73, 8, 14, 247, 251, 255, 255);
     draw_text_fit(r, ui->sm, album, win_w - 260, win_h - PLAYER_H + 30, 140, 96, 100, 109);
     char vol[64];
     snprintf(vol, sizeof(vol), "Volume %d%%", player->volume);
     draw_text_fit(r, ui->sm, vol, win_w - 150, win_h - PLAYER_H + 58, 120, 96, 100, 109);
+    draw_rect(r, win_w - 150, win_h - PLAYER_H + 82, 110, 4, 48, 51, 58, 255);
+    draw_rect(r, win_w - 150, win_h - PLAYER_H + 82, player->volume * 110 / 100, 4, 232, 237, 245, 255);
 
     if (lib->search_active) {
         int w = 520, h = 46;
@@ -892,6 +1102,30 @@ static void toggle_favorite(Library *lib)
     save_favorites(lib);
     if (lib->view == VIEW_FAVORITES && !lib->tracks[lib->selected].favorite)
         select_first_visible(lib);
+}
+
+static bool set_progress_from_mouse(Player *player, int mx, int my)
+{
+    int cx = win_w / 2;
+    int x = cx - 220;
+    int y = win_h - PLAYER_H + 66;
+    if (mx < x || mx > x + 440 || my < y || my > y + 28)
+        return false;
+    if (player->duration_sec <= 0) return true;
+    double frac = (double)(mx - x) / 440.0;
+    player_seek(player, frac * player->duration_sec);
+    return true;
+}
+
+static bool set_volume_from_mouse(Player *player, int mx, int my)
+{
+    int x = win_w - 150;
+    int y = win_h - PLAYER_H + 70;
+    if (mx < x || mx > x + 110 || my < y || my > y + 28)
+        return false;
+    int volume = (mx - x) * 100 / 110;
+    player_set_volume(player, volume);
+    return true;
 }
 
 int main(int argc, char **argv)
@@ -951,6 +1185,8 @@ int main(int argc, char **argv)
     SDL_StartTextInput();
 
     bool running = true;
+    bool dragging_progress = false;
+    bool dragging_volume = false;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -965,18 +1201,36 @@ int main(int argc, char **argv)
                 if (lib->scroll_y < 0) lib->scroll_y = 0;
                 if (lib->scroll_y > lib->max_scroll) lib->scroll_y = lib->max_scroll;
             } else if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
-                int nav = sidebar_hit(ev.button.x, ev.button.y);
+                if (set_progress_from_mouse(&player, ev.button.x, ev.button.y)) {
+                    dragging_progress = true;
+                    continue;
+                }
+                if (set_volume_from_mouse(&player, ev.button.x, ev.button.y)) {
+                    dragging_volume = true;
+                    continue;
+                }
+                int playlist_idx = -1;
+                int nav = sidebar_hit(lib, ev.button.x, ev.button.y, &playlist_idx);
                 if (nav >= 0) {
                     lib->view = (ViewMode)nav;
+                    lib->active_playlist = playlist_idx;
                     lib->scroll_y = 0;
                     select_first_visible(lib);
                 } else {
                     int idx = hit_test(lib, ev.button.x, ev.button.y);
                     if (idx >= 0) {
-                    lib->selected = idx;
-                    play_selected(&player, lib);
+                        lib->selected = idx;
+                        ensure_selected_visible(lib);
                     }
                 }
+            } else if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT) {
+                dragging_progress = false;
+                dragging_volume = false;
+            } else if (ev.type == SDL_MOUSEMOTION) {
+                if (dragging_progress)
+                    set_progress_from_mouse(&player, ev.motion.x, ev.motion.y);
+                if (dragging_volume)
+                    set_volume_from_mouse(&player, ev.motion.x, ev.motion.y);
             } else if (ev.type == SDL_TEXTINPUT && lib->search_active) {
                 if (lib->ignore_next_text) {
                     lib->ignore_next_text = false;
@@ -1017,6 +1271,9 @@ int main(int argc, char **argv)
                     play_relative(&player, lib, -1);
                 } else if (key == SDLK_f) {
                     toggle_favorite(lib);
+                } else if (key == SDLK_a) {
+                    int pl = lib->view == VIEW_PLAYLIST ? lib->active_playlist : ensure_default_playlist(lib);
+                    add_to_playlist(lib, pl, lib->selected);
                 } else if (key == SDLK_s) {
                     player.shuffle = !player.shuffle;
                 } else if (key == SDLK_t) {
