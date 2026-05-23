@@ -1,8 +1,8 @@
 # ctify
 
 `ctify` is a small local music player for Linux written in C. It scans
-`~/Music` by default, shows your local tracks in a Soundwave-style SDL
-interface, and uses `mpv` as the playback backend.
+`~/Music` by default, shows your local tracks in a dark SDL interface, and
+uses `mpv` as the playback backend.
 
 Supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.aac`,
 `.opus`, and `.wma`.
