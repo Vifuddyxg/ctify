@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=ctify
-Comment=Local music player
-Exec=ctify
+Name=Citify
+GenericName=Local Music Player
+Comment=Browse and play your local music library
+Exec=citify
 Terminal=false
 Categories=AudioVideo;Audio;Player;
-Keywords=music;audio;mp3;player;library;
+Keywords=ctify;citify;music;audio;mp3;player;library;
 StartupNotify=true
