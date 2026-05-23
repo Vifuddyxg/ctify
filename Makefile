@@ -1,4 +1,4 @@
-CC      = gcc
+CC     ?= cc
 TARGET  = ctify
 ALIAS   = citify
 SRCDIR  = src
@@ -12,7 +12,7 @@ SDL_CFLAGS := $(shell pkg-config --cflags sdl2 SDL2_ttf sqlite3 2>/dev/null || e
 SDL_LIBS   := $(shell pkg-config --libs sdl2 SDL2_ttf sqlite3 2>/dev/null || echo "-lSDL2 -lSDL2_ttf -lsqlite3")
 
 CFLAGS  = -std=c11 -Wall -Wextra -O2 $(SDL_CFLAGS)
-LDFLAGS = $(SDL_LIBS) -lm -lpthread
+LDFLAGS = $(SDL_LIBS) -lm -pthread
 
 .PHONY: all clean install install-desktop
 
@@ -32,9 +32,11 @@ clean:
 	rm -rf $(BUILDDIR) $(TARGET)
 
 install: $(TARGET)
-	install -Dm755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
+	mkdir -p $(DESTDIR)$(PREFIX)/bin
+	mkdir -p $(DESTDIR)$(PREFIX)/share/applications
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 	ln -sf $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(ALIAS)
-	install -Dm644 ctify.desktop $(DESTDIR)$(PREFIX)/share/applications/ctify.desktop
+	install -m 644 ctify.desktop $(DESTDIR)$(PREFIX)/share/applications/ctify.desktop
 	@echo "Installed $(TARGET) to $(DESTDIR)$(PREFIX)/bin/$(TARGET)"
 	@echo "Installed $(ALIAS) alias to $(DESTDIR)$(PREFIX)/bin/$(ALIAS)"
 	@echo "Installed desktop launcher to $(DESTDIR)$(PREFIX)/share/applications/ctify.desktop"

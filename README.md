@@ -1,6 +1,6 @@
 # ctify
 
-`ctify` is a small local music player for Linux written in C. It scans
+`ctify` is a small local music player for Unix-like systems written in C. It scans
 `~/Music` by default, shows your local tracks in a dark SDL interface, and
 uses `mpv` as the playback backend.
 
@@ -25,6 +25,7 @@ Supported audio extensions: `.mp3`, `.flac`, `.ogg`, `.m4a`, `.wav`, `.aac`,
 - SQLite3
 - `mpv`
 - `ffmpeg` / `ffprobe` for metadata and album covers
+- `zenity` for the optional Add Music file picker
 
 Examples:
 
@@ -34,6 +35,8 @@ Examples:
 - openSUSE: `sudo zypper install git gcc make pkg-config libSDL2-devel SDL2_ttf-devel sqlite3-devel mpv ffmpeg`
 - Gentoo: `sudo emerge --ask dev-vcs/git sys-devel/gcc sys-devel/make virtual/pkgconfig media-libs/libsdl2 media-libs/sdl2-ttf dev-db/sqlite media-video/mpv media-video/ffmpeg`
 - Alpine: `sudo apk add git build-base pkgconf sdl2-dev sdl2_ttf-dev sqlite-dev mpv ffmpeg`
+- FreeBSD: `doas pkg install git gmake pkgconf sdl2 sdl2_ttf sqlite3 mpv ffmpeg zenity`
+- OpenBSD: `doas pkg_add git gmake pkgconf sdl2 sdl2-ttf sqlite3 mpv ffmpeg zenity`
 
 ## Full Install Example
 
@@ -44,6 +47,15 @@ git clone https://github.com/Vifuddyxg/ctify
 cd ctify
 make
 sudo make install
+```
+
+On FreeBSD/OpenBSD, use `gmake` and `doas`:
+
+```sh
+git clone https://github.com/Vifuddyxg/ctify
+cd ctify
+gmake
+doas gmake install
 ```
 
 Run after installing:
